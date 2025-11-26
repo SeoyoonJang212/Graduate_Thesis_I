@@ -1,0 +1,62 @@
+---
+title: "actual_data"
+author: "SY"
+date: "2025-09-22"
+output: html_document
+---
+```{r}
+U2 <- FindClusters(merged, resolution = 0.1)
+U2 <- RunUMAP(U2, reduction = "harmony", dims = 1:15)
+DimPlot(U2, reduction = "umap")
+
+Idents(U2) <- "seurat_clusters"
+table(Idents(U2))
+U2 <- JoinLayers(U2)
+U2markers <- FindAllMarkers(
++     U2,
++     only.pos = TRUE,  #(양의 marker만)
++     min.pct = 0.25,   #(클러스터에서 25% 이상 발현)
++     logfc.threshold = 0.25    # log2FC 기준
+)
+
+U2markers %>%
++     group_by(cluster) %>%
++     dplyr::filter(avg_log2FC > 1)
+
+write.csv(U2markers, file = "U2markers.csv", row.names = FALSE)
+
+U2markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 10) %>%
+    ungroup() -> top10
+DoHeatmap(U2markers, features = top10$gene) + NoLegend()
+
+avg <- AverageExpression(U2, features = top10$gene)
+
+FeaturePlot(U2, features = c("Pdgfra","Col1a1","Dcn","Lum"))
+VlnPlot(U2, features = c("Sox9","Runx2","Acta2"), group.by = "seurat_clusters")
+
+U2$cluster_anno <- factor(
+  U2$cluster_anno,
+  levels = c(
+    "0.Monocyte/Macrophage",
+    "1.Fibroblast/MSC",
+    "2.Endothelial",
+    "3.Immune",
+    "4.VSMC/Pericyte",
+    "5.Cell cycle/proliferating",
+    "6.Erythrocyte/Erythroid prog.",
+    "7.T cell lineage",
+    "8.Oligodendrocyte/Glial",
+    "9.Cell cycle/proliferating"
+  )
+)
+
+# 다시 Idents 지정
+Idents(U2) <- "cluster_anno"
+
+# UMAP plot
+DimPlot(U2, reduction = "umap", label = TRUE, repel = TRUE)
+
+```

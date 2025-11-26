@@ -1,0 +1,576 @@
+---
+title: "data_HO"
+author: "SY"
+date: "2025-09-17"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+**Data**
+```{r}
+# seurat_list = initial data(processed)
+# clean_obj = [[1]] data w/o mt NaN
+# clean_list = whole data w/o mt NaN
+# check_na = checking processed data
+# vln_list = whole data to vlnplot
+# qc_filtered_list = whole data after QC
+# normalized_list = whole data after normalization
+# feature_list = whole data after feature selection
+# scale_list = whole data after scaling
+# PCA_list = whole data after PCA
+# merged = whole data after batch named, merged
+# umap_list = UMAP w/ 4 resolution options
+# basic = resolution 0.6, all data before marker
+# all markers = markers for each clusters
+# U2 = resolution 0.1
+# msc = subset (only MSC)
+# msc_markers = gene markers in msc
+# msc_filtered = doublet deleted msc
+# msc2_markers = markers of msc_filtered
+```
+*Data download*
+```{r}
+#### 압축 해제 ####
+untar("GSE126060_RAW.tar", exdir = "GSE126060_RAW") 
+
+#### 현재 작업 폴더 확인 ####
+getwd()
+
+#### 현재 폴더의 파일 목록 확인 ####
+list.files()
+```
+*Package activate*
+```{r}
+library(Seurat)
+library(patchwork)
+library(Matrix)
+library(ggplot2)
+library(harmony)
+library(dplyr)
+library(sctransform)
+library(BiocManager)
+library(SingleR)
+library(celldex)
+library(SingleCellExperiment)
+```
+*Package folder making*
+```{r}
+#### RAW data 목록 보기 ####
+list.files("GSE126060_RAW")
+
+#### 필요한 패키지 ####
+library(fs) #(파일 관련 다룰 때 유용)
+
+#### 경로 설정 ####
+raw_path <- "GSE126060_RAW" #(변수에 데이터 있는 폴더 경로 저장)
+files <- list.files(raw_path, full.names = TRUE) #(폴더 안 모든 파일 이름 가져와 files 변수에 저장)
+
+#### 샘플 ID 추출 ####
+sample_ids <- unique(gsub("_(barcodes|genes|matrix).*","",basename(files)))
+
+#### 폴더 만들고 파일 이동 / 이름정리 ####
+for(id in sample_ids) {
+  + dir.create(file.path(raw_path,id), showWarnings = FALSE)
+  + file.rename(
+      from = file.path(raw_path, paste0(id, "barcodes.tsv.gz")),
+      to = file.path(raw_path, id, "barcodes.tsv.gz")
+      )
+    + file.rename(
+      from = file.path(raw_path, paste0(id, "genes.tsv.gz")),
+      to = file.path(raw_path, id, "genes.tsv.gz")
+      )
+    + file.rename(
+      from = file.path(raw_path, paste0(id, "matrix.tsv.gz")),
+      to = file.path(raw_path, id, "matrix.tsv.gz")
+      )
+}
+
+#### 바뀐 이름 저장 및 이름 변경2 ####
+folders <- list.dirs("GSE126060_RAW", full.names = TRUE, recursive = FALSE)
+
+for (f in folders) {
+    file.rename(
+        from = file.path(f, "genes.tsv.gz"), #(10X genomics의 최신 포맷은 features를 지원)
+        to   = file.path(f, "features.tsv.gz")
+    )
+}
+
+#### 각 폴더 Seurat object 생성 ####
+base_dir <- "GSE126060_RAW"
+sample_dirs <- list.dirs(base_dir, full.names = TRUE, recursive = FALSE)
+
+seurat_list <- lapply(sample_dirs, function(sample_path) {
+    sample_name <- basename(sample_path)
+    message(paste("Processing: ", sample_name))
+    data <- Read10X(data.dir = sample_path)
+    seurat_obj <- CreateSeuratObject(counts = data, project = sample_name)
+    return(seurat_obj)
+})
+
+#### 이름 붙여주기 ####
+names(seurat_list) <- basename(sample_dirs)
+View(seurat_list)
+```
+*percent.mt sorting*
+```{r}
+#### NaN인 데이터 삭제####
+clean_list <- lapply(seurat_list, function(obj) {
+  if (is.null(obj@meta.data$percent.mt)) {
+    obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^Mt")
+  }
+  subset(obj, subset = !is.na(percent.mt))
+})
+
+#### Seurat 객체 각 이름 지정 ####
+if (is.null(names(clean_list))) {
+  names(clean_list) <- vapply(clean_list, function(x) x@HO.data, character(1))
+}
+
+#### 샘플별 남아있는 NaN 개수 확인 ####
+check_na <- lapply(clean_list, function(df) {
+  sum(is.na(df)) == 0  # TRUE면 NaN 없음
+})
+print(check_na)
+```
+*violin plot*
+```{r}
+#### sample별 VlnPlot 생성 ####
+vln_list <- lapply(clean_list, function(obj) {
+  VlnPlot(obj,
+          features = c("nFeature_RNA", "nCount_RNA", "percent.mt"),
+          ncol = 3,
+          pt.size = 0.1)
+})
+
+#### 묶어서 시각화 ####
+wrap_plots(vln_list, ncol = 2) #(너무 크면 안될수도)
+vln_list[[1]] #(하나하나 출력하는 방법)
+```
+*QC*
+```{r}
+#### Seurat QC 필터링 적용 ####
+qc_filtered_list <- list()
+
+for (sample_name in names(clean_list)) {
+  obj <- clean_list[[sample_name]]
+  DefaultAssay(obj) <- "RNA"
+  
+  if (sample_name == "GSM3589975_HODay0replicate1") {
+    obj <- subset(obj, subset = nFeature_RNA > 200 & nFeature_RNA < 5000 & percent.mt < 25 & nCount_RNA > 0)
+    
+  } else if (grepl("Day0", sample_name)) {
+    obj <- subset(obj, subset = nFeature_RNA > 200 & nFeature_RNA < 5000 & percent.mt < 5 & nCount_RNA > 0)
+    
+  } else if (grepl("Day3", sample_name)) {
+    obj <- subset(obj, subset = nFeature_RNA > 200 & nFeature_RNA < 6500 & percent.mt < 5 & nCount_RNA > 0)
+    
+  } else if (grepl("Day7|Day21|CD47", sample_name)) {
+    obj <- subset(obj, subset = nFeature_RNA > 200 & nFeature_RNA < 6000 & percent.mt < 5 & nCount_RNA > 0)
+  }
+  
+  
+  qc_filtered_list[[sample_name]] <- obj
+}
+
+#### 각 data cell 수 출력 ####
+sapply(qc_filtered_list, ncol)
+```
+*Normalization*
+```{r}
+#### normalization, 10000 default ####
+normalized_list <- lapply(qc_filtered_list, function(obj) {
+  NormalizeData(obj, normalization.method = "LogNormalize", scale.factor = 10000)
+})
+
+#### 각 샘플별로 non-zero 개수 확인 ####
+nnzero_counts <- sapply(normalized_list, function(obj) {
+  Matrix::nnzero(GetAssayData(obj, layer = "data"))
+})
+
+nnzero_counts #(0이 아니면 정규화 완료)
+```
+*Feature Selection*
+```{r}
+#### 상위 유전자 선택 ####
+feature_list <- lapply(normalized_list, function(obj) {
+  obj <- FindVariableFeatures(
+    object = obj,
+    selection.method = "vst",   #(변동성 계산 방법 (기본: "vst"))
+    nfeatures = 2000,           #(2000은 Seurat default)
+    verbose = FALSE
+  )
+  return(obj)
+})
+
+#### 선별된 유전자와 개수 확인 ####
+head(VariableFeatures(normalized_list[[1]]))
+length(VariableFeatures(normalized_list[[1]])) #(보통 2000)
+
+#### 시각화 ####
+top10 <- head(VariableFeatures(feature_list[[1]]), 10)
+LabelPoints(plot = VariableFeaturePlot(feature_list[[1]]), points = top10, repel = TRUE) #(상위 10개)
+```
+*Scaling & PCA*
+```{r}
+#### Scaling data ####
+scale_list <- list()
+for (i in names(feature_list)) {
+     scale_list[[i]] <- ScaleData(
+         feature_list[[i]], 
+         features = VariableFeatures(feature_list[[i]])
+     )
+ }
+
+#### PCA ####
+PCA_list <- list()
+for (i in names(scale_list)) {
+  PCA_list[[i]] <- RunPCA(
+    scale_list[[i]],
+    features = VariableFeatures(scale_list[[i]]),
+    npcs = 50,
+    verbose = FALSE
+  )
+}
+
+#### 샘플 이름별 추출 ####
+day0_samples <- grep("Day0", names(PCA_list), value = TRUE) #(Day0, 3, 7, 21 ,CD47)
+
+#### ElbowPlot ####
+plots_day <- lapply(day0_samples, function(i) {
+  ElbowPlot(PCA_list[[i]], ndims = 50) + ggtitle(i)
+})
+wrap_plots(plots_day, ncol = 2, nrow = 2)  #(day0_samples에 각각 넣어주기)
+```
+*Merge & Batch correction*
+```{r}
+#### 각 샘플 이름을 batch 변수로 메타데이터에 저장 ####
+for (i in names(scale_list)) {  #(merge는 raw, normalized만 다룸 - pca한 object에 없음)
+  scale_list[[i]]$batch <- i
+}
+
+#### merge ####
+merged <- merge(
+  x = scale_list[[1]],
+  y = scale_list[-1],
+  add.cell.ids = names(scale_list),   #(cell 이름 앞에 샘플 ID 붙여줌)
+  project = "data_HO_2"              #(프로젝트 이름은 자유롭게)
+)
+
+#### 묶음으로 다시 처리 ####
+merged <- FindVariableFeatures(merged, selection.method = "vst", nfeatures = 2000)
+merged <- ScaleData(merged, features = VariableFeatures(merged))
+merged <- RunPCA(merged, features = VariableFeatures(merged), npcs = 50, verbose = FALSE)
+
+#### Harmony ####
+merged <- RunHarmony(
+  object = merged,
+  group.by.vars = "batch",
+  dims = 1:15
+)
+
+#### batch(integration 확인), day별 map ####
+merged$day <- ifelse(grepl("Day0", merged$batch), "Day0",
+              ifelse(grepl("Day3", merged$batch), "Day3",
+              ifelse(grepl("Day7", merged$batch), "Day7",
+            ifelse(grepl("Day21", merged$batch), "Day21",
+              ifelse(grepl("CD47", merged$batch), "CD47", "Unknown")))))
+
+p1 <- DimPlot(
+  merged,
+  reduction = "umap",
+  group.by = "batch",
+  pt.size = 0.5
+) + ggtitle("Batch")
+p1
+```
+*Clustering*
+```{r}
+#### 세포끼리 가까운 이웃 관계 계산 ####
+merged <- FindNeighbors(merged, reduction = "harmony", dims = 1:15)
+
+#### resolution 조절하며 UMAP 만들기 ####
+resolutions <- c(0.4, 0.6, 0.8, 1.0)
+
+umap_list <- list()
+
+for (res in resolutions) {
+
+  umap <- FindClusters(merged, resolution = res) #(cluster 정의)
+  umap <- RunUMAP(umap, reduction = "harmony", dims = 1:15)
+  umap_list[[paste0("res", res)]] <- umap
+}
+
+names(umap_list) #(확인)
+
+#### visualization ####
+for (res in names(umap_list)) {
+  print(
+    DimPlot(
+      umap_list[[res]],
+      reduction = "umap",
+      group.by = "seurat_clusters",
+      label = TRUE
+    ) + ggtitle(paste("Resolution =", res))
+  )
+} #(순차적으로 resolution별 UMAP 형성)
+
+#### resolution 선택 ####
+basic <- umap_list[["res0.6"]]
+```
+*save result*
+```{r}
+saveRDS(merged, file = "merged_after_clustering.rds")
+saveRDS(umap_list, file = "umap_list_resolutions.rds")
+```
+*Find marker*
+```{r}
+#### cluster identity 확인 ####
+Idents(basic) <- "seurat_clusters"
+table(Idents(basic))
+
+#### finding markers ####
+basic <- JoinLayers(basic)
+all_markers <- FindAllMarkers(
+  basic,
+  only.pos = TRUE,  #(양의 marker만)
+  min.pct = 0.25,   #(클러스터에서 25% 이상 발현)
+  logfc.threshold = 0.25    # log2FC 기준
+)
+
+#### 표로 나타내고 저장 #### 
+all_markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+
+write.csv(all_markers, file = "all_markers.csv", row.names = FALSE)
+
+#### top marker 추리기 ####
+top5 <- all_markers %>%
+  group_by(cluster) %>%
+  arrange(desc(avg_log2FC), .by_group = TRUE) %>%
+  slice(1:5) %>%
+  ungroup()
+top
+
+#write.csv(top5, file = "top5_markers.csv", row.names = FALSE)
+#write.xlsx(top5, file = "top5_markers.xlsx", rowNames = FALSE)
+```
+```{r}
+U2 <- FindClusters(merged, resolution = 0.1)
+U2 <- RunUMAP(U2, reduction = "harmony", dims = 1:15)
+DimPlot(U2, reduction = "umap")
+
+Idents(U2) <- "seurat_clusters"
+table(Idents(U2))
+U2 <- JoinLayers(U2)
+U2markers <- FindAllMarkers(
++     U2,
++     only.pos = TRUE,  #(양의 marker만)
++     min.pct = 0.25,   #(클러스터에서 25% 이상 발현)
++     logfc.threshold = 0.25    # log2FC 기준
+)
+
+U2markers %>%
++     group_by(cluster) %>%
++     dplyr::filter(avg_log2FC > 1)
+
+write.csv(U2markers, file = "U2markers.csv", row.names = FALSE)
+
+U2markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 10) %>%
+    ungroup() -> top10
+DoHeatmap(U2markers, features = top10$gene) + NoLegend()
+
+avg <- AverageExpression(U2, features = top10$gene)
+
+FeaturePlot(U2, features = c("Pdgfra","Col1a1","Dcn","Lum"))
+VlnPlot(U2, features = c("Sox9","Runx2","Acta2"), group.by = "seurat_clusters")
+
+U2$cluster_anno <- factor(
+  U2$cluster_anno,
+  levels = c(
+    "0.Monocyte/Macrophage",
+    "1.Fibroblast/MSC",
+    "2.Endothelial",
+    "3.Immune",
+    "4.VSMC/Pericyte",
+    "5.Cell cycle/proliferating",
+    "6.Erythrocyte/Erythroid prog.",
+    "7.T cell lineage",
+    "8.Oligodendrocyte/Glial",
+    "9.Cell cycle/proliferating"
+  )
+)
+
+# 다시 Idents 지정
+Idents(U2) <- "cluster_anno"
+
+# UMAP plot
+DimPlot(U2, reduction = "umap", label = TRUE, repel = TRUE)
+
+```
+*Annotation*
+```{r}
+#이 흐름으로는 basic 쓰면 됨. 지금까지 한 걸 0.1로 조정한 U2로 대체해서 작성.
+#### cluster 번호별 annotation ####
+celltype_annotations <- c(
+  "Monocyte/Macrophage",       # cluster 0
+  "Fibroblast / MSC",          # cluster 1
+  "Endothelial",               # cluster 2
+  "Immune",                    # cluster 3
+  "VSMC/Pericyte",             # cluster 4
+  "Cell cycle/proliferating",  # cluster 5
+  "Erythrocyte/Erythroid prog.",# cluster 6
+  "T cell lineage",            # cluster 7
+  "Oligodendrocyte/Glial",     # cluster 8
+  "Cell cycle/proliferating"   # cluster 9
+)
+
+#### Seurat object에 metadata 추가 ####
+levels(your_obj)  #(예: 0~9) #(현재 클러스터 ID 확인)
+
+U2$celltype <- plyr::mapvalues(
+  x = U2$seurat_clusters,  #(metadata에 새로운 column 추가)
+  from = levels(U2), 
+  to = celltype_annotations
+)
+
+#### Idents() 바꾸고 UMAP 그리기 ####
+Idents(U2) <- "celltype" #(celltype annotation을 기준으로 그림)
+
+DimPlot(U2, reduction = "umap", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP with Cell Type Annotation")
+
+#### + cluster ID + annotation 합치기 ####
+U2$cluster_anno <- paste0(
+  U2$seurat_clusters, ".", U2$celltype
+)
+Idents(U2) <- "cluster_anno"
+DimPlot(U2, reduction = "umap", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP with Cluster ID + Annotation")
+```
+*Subset*
+```{r}
+#### 원하는 cluster만 추출 ####
+msc <- subset(U2, idents = "Fibroblast / MSC")
+table(Idents(msc))  #(뽑힌 세포 수 확인)
+DimPlot(msc, reduction = "umap")  #(subset 후 시각화)
+```
+*Normalization/PCA/UMAP-2*
+```{r}
+#### subset normalization ####
+msc <- SCTransform(msc, vars.to.regress = "percent.mt", verbose = FALSE)
+
+#### PCA ####
+msc <- RunPCA(msc, verbose = FALSE)
+ElbowPlot(msc)   #(몇 개의 PC 쓸지 결정)
+
+#### UMAP ####
+msc <- FindNeighbors(msc, dims = 1:10)
+msc <- FindClusters(msc, resolution = 0.3)
+msc <- RunUMAP(msc, dims = 1:10)
+
+DimPlot(msc, reduction = "umap", label = TRUE, repel = TRUE)
+```
+*Find marker-2*
+```{r}
+#### cluster별 marker gene ####
+msc_markers <- FindAllMarkers(msc, 
+                              only.pos = TRUE, 
+                              min.pct = 0.25, 
+                              logfc.threshold = 0.25)
+
+#### 상위 마커들들 ####
+head(msc_markers)
+
+#### cluster별 top10 ####
+msc_markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+
+write.csv(msc_markers, file = "msc_markers.csv", row.names = FALSE)
+
+#### visualize ####
+DefaultAssay(msc) <- "RNA"
+
+FeaturePlot(msc, features = c("Col1a1","Col3a1","Pdgfrb","Rgs5","Acta2","Myh11"))
+
+DotPlot(msc, features = c("Col1a1","Pdgfra","Rgs5","Pdgfrb","Acta2","Myh11")) + RotatedAxis()
+```
+*Annotation-SingleR*
+```{r}
+#### SingleR ####
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install(c("SingleR", "celldex"))
+
+library(Seurat)
+library(SingleCellExperiment)
+library(SingleR)
+library(celldex)
+
+#(Tabula Muris reference (mouse))
+ref <- MouseRNAseqData()
+#(ref$label.main: broad cell type (Fibroblast, Endothelial, Immune…))
+#(ref$label.fine: 더 세분화된 cell type)
+
+msc_sce <- as.SingleCellExperiment(msc) #(seurat object로)
+
+#(SingleR 예측)
+pred <- SingleR(test = msc_sce, ref = ref, labels = ref$label.main)
+
+#(결과를 Seurat object에 추가)
+msc$SingleR_label <- pred$labels
+
+#### visualization ####
+DimPlot(msc, group.by = "SingleR_label", label = TRUE, repel = TRUE) +
+  ggtitle("UMAP with SingleR annotation (Tabula Muris reference)")
+
+# 더 fine-grained label 사용 가능
+pred_fine <- SingleR(test = msc_sce, ref = ref, labels = ref$label.fine)
+msc$SingleR_label_fine <- pred_fine$labels
+```
+*Doublet Deletion*
+```{r}
+#### adipocyte, fibroblast만 남기기 ####
+msc_filtered <- subset(
+  msc,
+  subset = !SingleR_label %in% c("Endothelial cells", "Macrophages", "Monocytes")
+)
+
+table(msc_filtered$SingleR_label)   #(남은 세포 개수 확인)
+DimPlot(msc_filtered, group.by = "SingleR_label", label = TRUE, repel = TRUE)
+```
+*Normalization/PCA/UMAP-3*
+```{r}
+msc_filtered <- NormalizeData(msc_filtered)
+msc_filtered <- FindVariableFeatures(msc_filtered, nfeatures = 2000)
+msc_filtered <- ScaleData(msc_filtered)
+msc_filtered <- RunPCA(msc_filtered)
+ElbowPlot(msc_filtered)
+msc_filtered <- FindNeighbors(msc_filtered, dims = 1:10)
+msc_filtered <- FindClusters(msc_filtered, resolution = 0.1) 
+msc_filtered <- RunUMAP(msc_filtered, dims = 1:10)
+DimPlot(msc_filtered, label = TRUE, repel = TRUE)
+```
+*Find marker-3*
+```{r}
+#### marker visualization ####
+msc2_markers <- FindAllMarkers(msc_filtered, only.pos = TRUE)
+write.csv(msc2_markers, file = "msc_markers.csv", row.names = FALSE)
+
+# ECM fibroblast
+VlnPlot(msc_filtered, features = c("Col1a1","Col3a1","Dcn","Lum"))
+# Myofibroblast
+VlnPlot(msc_filtered, features = c("Acta2","Tagln","Myh11"))    
+# Pericyte
+VlnPlot(msc_filtered, features = c("Pdgfrb","Rgs5","Cspg4"))
+# MSC-like
+VlnPlot(msc_filtered, features = c("Cd34","Ly6a","Pdgfra","Thy1"))
+
+
+```
+

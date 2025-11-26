@@ -1,0 +1,121 @@
+---
+title: "real_data"
+author: "SY"
+date: "2025-09-30"
+output: html_document
+---
+```{r}
+msc_filtered <- readRDS("msc_filtered_250930.rds")
+sce <- readRDS("sce_250930.rds")
+# 1. CRAN에서 일반 패키지 설치
+install.packages("Seurat")
+install.packages("patchwork")
+install.packages("Matrix") # 보통 R 설치 시 기본 내장되어 있습니다.
+install.packages("ggplot2")
+install.packages("harmony")
+install.packages("dplyr")
+install.packages("sctransform")
+
+# 2. Bioconductor 패키지 설치를 위한 BiocManager 설치
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+    install.packages("BiocManager")
+}
+
+# 3. BiocManager를 사용하여 Bioconductor 패키지 설치
+BiocManager::install("SingleR")
+BiocManager::install("celldex")
+BiocManager::install("SingleCellExperiment")
+
+
+
+
+msc_filtered <- subset(msc_filtered, idents = setdiff(levels(msc_filtered), "4"))
+table(Idents(msc_filtered))
+DimPlot(msc_filtered, reduction = "umap", label = TRUE)
+
+
+# cluster 3 제외한 셀만 선택
+cells_to_keep <- colnames(msc_filtered)[Idents(msc_filtered) != "3"]
+
+# count matrix만 추출
+counts_mat <- GetAssayData(msc_filtered, assay = "RNA", slot = "counts")[, cells_to_keep]
+
+# 새 object 생성
+msc_new <- CreateSeuratObject(counts = counts_mat)
+
+# 필요한 경우 meta.data 다시 붙이기
+msc_new@meta.data <- msc_filtered@meta.data[cells_to_keep, ]
+
+# 클러스터 정보 다시 지정
+Idents(msc_new) <- msc_filtered@meta.data[cells_to_keep, "seurat_clusters"]
+
+msc_new <- NormalizeData(msc_new, normalization.method = "LogNormalize", scale.factor = 10000)
+msc_new <- ScaleData(msc_new, verbose = FALSE)
+msc_new <- FindVariableFeatures(
+    object = msc_new,
+    selection.method = "vst",   #(변동성 계산 방법 (기본: "vst"))
+    nfeatures = 2000,           #(2000은 Seurat default)
+    verbose = FALSE
+  )
+msc_new <- RunPCA(msc_new, verbose = FALSE)
+msc_new <- RunUMAP(msc_new, reduction = "pca", dims = 1:15)
+DimPlot(msc_new) + ggtitle("shrinked cluster")
+msc_new_umap <- DimPlot(msc_new) + ggtitle("shrinked cluster")
+ggsave("msc_new_umap.png", msc_new_umap, width = 10, height = 8, dpi = 300)
+```
+
+*지금까지 cluster 세 개로 줄인 msc_new에 msc로 추정되는 것들 모아놓음. 더 세분화해서 annotation 할 것*
+```{r}
+BiocManager::install("slingshot")
+library(SingleCellExperiment)  # 필요 시
+library(slingshot)
+# UMAP 좌표 추출
+umap <- Embeddings(msc_new, reduction = "umap")
+
+# 클러스터 정보 (factor로!)
+clusters <- factor(Idents(msc_new))
+# Slingshot trajectory 계산
+sds <- slingshot(umap, clusterLabels = clusters)
+# 기본 plot
+plot(umap, col = clusters, pch = 16, asp = 1)
+lines(SlingshotDataSet(sds), lwd = 2, col = 'black')
+# 1. 이미지 저장 장치 열기
+png("trajectory_plot.png", width = 800, height = 1000)
+
+# 2. 그림 그리기 (umap + slingshot trajectory)
+plot(umap, col = clusters, pch = 16, asp = 1)
+lines(SlingshotDataSet(sds), lwd = 2, col = 'black')
+
+# 3. 저장 장치 닫기
+dev.off()
+```
+
+**중간고사 이후 작업**
+```{r}
+### 여기서부터 중간고사 후 11월3일 이후 진전도 ###
+msc_new <- NormalizeData(msc_new)
+msc_new <- FindVariableFeatures(msc_new)
+msc_new <- ScaleData(msc_new)
+msc_new <- RunPCA(msc_new)
+ElbowPlot(msc_new)
+
+# 1:9가 가장 적당한 값, 일단 res 1.0으로 설정 #
+msc_new <- FindNeighbors(msc_new, dims = 1:9)
+msc_new <- FindClusters(msc_new, resolution = 1.0)
+
+msc_new <- RunUMAP(msc_new, dims = 1:9)
+DimPlot(msc_new, reduction = "umap", label = TRUE, pt.size = 0.5)
+
+png("UMAP_1103.png",  width = 1000, height = 800)
+DimPlot(msc_new, reduction = "umap", label = TRUE, pt.size = 0.5)
+dev.off()
+
+# 너무 cluster 많아서 줄여서 시도 #
+msc_new <- FindClusters(msc_new, resolution = 0.3)
+msc_new <- RunUMAP(msc_new, dims = 1:9)
+png("UMAP_1103.png",  width = 1400, height = 800)
+DimPlot(msc_new, reduction = "umap", label = TRUE, pt.size = 0.5)
+dev.off()
+
+
+```
