@@ -1,5 +1,5 @@
 ---
-title: "actual_data"
+title: "2nd data clustering job"
 author: "SY"
 date: "2025-09-22"
 output: html_document
@@ -58,5 +58,6 @@ Idents(U2) <- "cluster_anno"
 
 # UMAP plot
 DimPlot(U2, reduction = "umap", label = TRUE, repel = TRUE)
+
 
 ```
